@@ -69,15 +69,27 @@
 </head>
 <body>
 <div id="app"></div>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
 <script>
+// ─── Firebase ─────────────────────────────────────────────
+firebase.initializeApp({
+  apiKey: "AIzaSyAOmr5uZaMBN0aduKg7k7wRCe0978BcbCo",
+  authDomain: "hunting-permits-wtx.firebaseapp.com",
+  projectId: "hunting-permits-wtx",
+  storageBucket: "hunting-permits-wtx.firebasestorage.app",
+  messagingSenderId: "418496930100",
+  appId: "1:418496930100:web:f6c28111ebd208417a8561"
+});
+const firestore = firebase.firestore();
+const COLL = 'permits';
+
 // ─── Storage ───────────────────────────────────────────────
-const KEY = 'bh_permits_v2';
 const db = {
-  all: () => { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } },
-  save: (list) => localStorage.setItem(KEY, JSON.stringify(list)),
-  upsert(p) { const a = db.all(); const i = a.findIndex(x => x.id === p.id); i >= 0 ? a[i] = p : a.push(p); db.save(a); },
-  del: (id) => db.save(db.all().filter(p => p.id !== id)),
-  find: (id) => db.all().find(p => p.id === id),
+  all: () => S.permits,
+  find: (id) => S.permits.find(p => p.id === id),
+  async upsert(p) { await firestore.collection(COLL).doc(p.id).set(p); },
+  async del(id) { await firestore.collection(COLL).doc(id).delete(); },
 };
 
 // ─── Helpers ──────────────────────────────────────────────
@@ -141,6 +153,7 @@ const S = {
   editId: null,
   viewerPermit: null,
   f: null,
+  permits: [],
 };
 
 function freshForm() {
@@ -502,7 +515,7 @@ function syncFromDOM() {
   S.f.expiresDate = g('fi-exp'); S.f.species = g('fi-species');
 }
 
-function submitForm() {
+async function submitForm() {
   syncFromDOM();
   const f = S.f;
   if (!f.ranchName.trim()) { toast('Ranch name is required'); return; }
@@ -523,7 +536,7 @@ function submitForm() {
     createdAt: prev?.createdAt || new Date().toISOString(),
   };
 
-  db.upsert(permit);
+  await db.upsert(permit);
   copyText(makeLink(permit), S.editId ? 'Updated link copied — resend to customer' : 'Permit link copied to clipboard!');
   S.editId = null; S.f = freshForm(); S.tab = 'issued';
   renderAdmin();
@@ -555,24 +568,28 @@ function doPreview(id) {
   S.viewerPermit = p; S.tab = 'viewer'; renderAdmin();
 }
 
-function doRevoke(id) {
+async function doRevoke(id) {
   const p = db.find(id); if (!p) return;
-  p.deactivated = !p.deactivated; db.upsert(p);
+  p.deactivated = !p.deactivated; await db.upsert(p);
   copyText(makeLink(p), p.deactivated
     ? `Permit ${p.permitNumber} revoked — resend the updated link to the customer`
     : `Permit ${p.permitNumber} reactivated — resend the updated link to the customer`);
   renderAdmin();
 }
 
-function doDelete(id) {
+async function doDelete(id) {
   const p = db.find(id); if (!p) return;
   if (confirm(`Delete permit ${p.permitNumber} for ${p.holderName}?\n\nThis cannot be undone.`)) {
-    db.del(id); toast('Permit deleted'); renderAdmin();
+    await db.del(id); toast('Permit deleted'); renderAdmin();
   }
 }
 
 // ─── Boot ─────────────────────────────────────────────────
-render();
+document.getElementById('app').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#4E7A44;font-family:Inter,sans-serif;font-size:14px;">Loading permits…</div>';
+firestore.collection(COLL).orderBy('createdAt', 'asc').onSnapshot(snapshot => {
+  S.permits = snapshot.docs.map(d => d.data());
+  render();
+});
 </script>
 </body>
 </html>
