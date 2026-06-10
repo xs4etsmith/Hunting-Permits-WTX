@@ -6,6 +6,7 @@
 <title>Bird Hunt Permit Hub</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -53,6 +54,9 @@
 
   .permit-shadow { box-shadow: 0 2px 8px -2px rgba(28,45,28,0.10), 0 12px 36px -4px rgba(28,45,28,0.16); }
 
+  .sig-canvas { touch-action: none; cursor: crosshair; display: block; width: 100%; height: 110px; background: #fff; border-radius: 8px; border: 1.5px solid #D1D5DB; }
+  .sig-canvas:focus { outline: none; border-color: #4E7A44; box-shadow: 0 0 0 3px rgba(78,122,68,0.13); }
+
   @keyframes toastIn { from { opacity:0; transform:translateX(-50%) translateY(8px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
   .toast-el {
     position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
@@ -84,6 +88,23 @@ firebase.initializeApp({
 });
 const firestore = firebase.firestore();
 const COLL = 'permits';
+const WAIVER_COLL = 'waivers';
+
+// ─── EmailJS Config ────────────────────────────────────────
+// Setup: emailjs.com → Add Gmail service → create 2 templates → paste IDs below
+// Permit template vars: {{to_name}} {{to_email}} {{ranch_name}} {{permit_number}} {{permit_link}} {{expires_date}}
+// Waiver template vars: {{to_name}} {{to_email}} {{ranch_name}} {{waiver_link}}
+const EJ_PUBLIC_KEY   = 'DhpV3ZUNgAnyOsv_V';
+const EJ_SERVICE_ID   = 'service_jqqtdrs';
+const EJ_PERMIT_TPL   = 'template_fd6e5ts';
+const EJ_WAIVER_TPL   = 'template_3rqh7di';
+if (EJ_PUBLIC_KEY) emailjs.init(EJ_PUBLIC_KEY);
+function ejReady() { return !!(EJ_PUBLIC_KEY && EJ_SERVICE_ID && EJ_PERMIT_TPL && EJ_WAIVER_TPL); }
+
+// Signature pad instances, keyed by canvas id
+const sigPads = {};
+// Waiver page state — prevents Firestore re-renders from wiping an in-progress signature
+const waiverState = { inProgress: false, submitted: false };
 
 // ─── Storage ───────────────────────────────────────────────
 const db = {
@@ -155,7 +176,9 @@ const S = {
   viewerPermit: null,
   f: null,
   permits: [],
+  waivers: [],
   upload: { rows: null, results: null, generating: false, parseError: null },
+  legalView: null, // waiver doc being viewed in modal
 };
 
 function freshForm() {
@@ -164,9 +187,22 @@ function freshForm() {
 S.f = freshForm();
 
 // ─── Root render ──────────────────────────────────────────
+function makeWaiverLink(p) { return `${location.origin}${location.pathname}?w=${encode(p)}`; }
+
 function render() {
-  const v = new URLSearchParams(location.search).get('v');
+  const params = new URLSearchParams(location.search);
+  const v = params.get('v');
+  const w = params.get('w');
   if (v) { const p = decode(v); if (p) { renderCustomer(p); return; } }
+  if (w) {
+    const p = decode(w);
+    if (p) {
+      if (waiverState.submitted) { renderWaiverSuccess(p); return; }
+      if (waiverState.inProgress) return; // guard: don't wipe canvas mid-signature
+      renderWaiverSigning(p);
+      return;
+    }
+  }
   renderAdmin();
 }
 
@@ -178,15 +214,15 @@ function renderAdmin() {
         <div class="max-w-4xl mx-auto px-4 h-14 flex items-center gap-3">
           <div class="flex items-center gap-2.5 mr-1">${bird(32)}<span class="text-white font-semibold text-[15px] tracking-tight">Bird Hunt Permit Hub</span></div>
           <nav class="flex items-center gap-0.5">
-            ${['new','issued','viewer','upload'].map((t,_,arr) => {
-              const labels = {'new':'New permit','issued':'Issued permits','viewer':'Viewer','upload':'Bulk upload'};
+            ${['new','issued','viewer','upload','legal'].map((t,_,arr) => {
+              const labels = {'new':'New permit','issued':'Issued permits','viewer':'Viewer','upload':'Bulk upload','legal':'Legal forms'};
               return `<button onclick="setTab('${t}')" class="tab-btn ${S.tab===t?'tab-active':'tab-inactive'}">${labels[t]}</button>`;
             }).join('')}
           </nav>
         </div>
       </header>
       <main class="max-w-4xl mx-auto px-4 py-8">
-        ${S.tab==='new' ? tabNew() : S.tab==='issued' ? tabIssued() : S.tab==='viewer' ? tabViewer() : tabUpload()}
+        ${S.tab==='new' ? tabNew() : S.tab==='issued' ? tabIssued() : S.tab==='viewer' ? tabViewer() : S.tab==='upload' ? tabUpload() : tabLegal()}
       </main>
     </div>`;
 }
@@ -345,6 +381,7 @@ function tabIssued() {
         <div class="flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
           <button onclick="doEdit('${p.id}')" title="Edit" class="action-btn hover:bg-forest-100 text-forest-600">${icoEdit()}</button>
           <button onclick="doCopy('${p.id}')" title="Copy link" class="action-btn hover:bg-forest-100 text-forest-600">${icoLink()}</button>
+          ${p.email ? `<button onclick="sendPermitEmail('${p.id}')" title="Email permit to ${esc(p.email)}" class="action-btn hover:bg-forest-100 text-forest-600">${icoMail()}</button>` : ''}
           <button onclick="doPreview('${p.id}')" title="Preview card" class="action-btn hover:bg-forest-100 text-forest-600">${icoEye()}</button>
           <button onclick="doRevoke('${p.id}')" title="${p.deactivated?'Reactivate':'Revoke'}"
             class="action-btn hover:bg-amber-50 ${p.deactivated?'text-amber-500':'text-gray-400'}">${icoSlash()}</button>
@@ -805,6 +842,325 @@ function downloadPermitTemplate() {
   a.download = 'permit-template.csv'; a.click();
 }
 
+// ─── Tab: Legal Forms ─────────────────────────────────────
+function tabLegal() {
+  const all = db.all().filter(p => p.email);
+  const noEmail = db.all().filter(p => !p.email);
+  const waiverMap = {};
+  S.waivers.forEach(w => { waiverMap[w.permitId] = w; });
+
+  const signed  = all.filter(p => waiverMap[p.id]?.signedAt).length;
+  const sent    = all.filter(p => p.waiverSentAt && !waiverMap[p.id]?.signedAt).length;
+  const pending = all.filter(p => !p.waiverSentAt && !waiverMap[p.id]?.signedAt).length;
+
+  const setupBanner = !ejReady() ? `
+    <div class="mb-5 px-5 py-4 bg-amber-50 border border-amber-200 rounded-xl">
+      <p class="text-sm font-semibold text-amber-800 mb-2">Email not configured — one-time setup required</p>
+      <ol class="text-xs text-amber-700 space-y-1 list-decimal list-inside mb-3">
+        <li>Create a free account at <strong>emailjs.com</strong> (200 emails/month free)</li>
+        <li>Email Services → Add New Service → Gmail → connect <strong>ytranchhunting@gmail.com</strong></li>
+        <li>Email Templates → create a <strong>permit</strong> template and a <strong>waiver</strong> template</li>
+        <li>Account → API Keys → copy your Public Key</li>
+        <li>Open <code class="bg-amber-100 px-1 rounded">index.html</code> and paste all 4 values into the <strong>EmailJS Config</strong> section near the top</li>
+      </ol>
+      <div class="grid grid-cols-2 gap-2 text-xs">
+        <div class="bg-amber-100 rounded p-2"><p class="font-semibold text-amber-800 mb-1">Permit template variables:</p><code class="text-amber-700 break-all">{{to_name}} {{to_email}} {{ranch_name}} {{permit_number}} {{permit_link}} {{expires_date}}</code></div>
+        <div class="bg-amber-100 rounded p-2"><p class="font-semibold text-amber-800 mb-1">Waiver template variables:</p><code class="text-amber-700 break-all">{{to_name}} {{to_email}} {{ranch_name}} {{waiver_link}}</code></div>
+      </div>
+    </div>` : '';
+
+  const modal = S.legalView ? `
+    <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onclick="if(event.target===this)closeLegalModal()">
+      <div class="bg-white rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+        <div style="background:#1C2D1C" class="px-5 py-4 flex items-center justify-between">
+          <div><p class="text-white font-semibold text-sm">${esc(S.legalView.holderName)}</p><p style="color:#6A9E5E" class="text-xs mt-0.5">Signed ${new Date(S.legalView.signedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</p></div>
+          <button onclick="closeLegalModal()" class="text-white/60 hover:text-white text-xl leading-none">&times;</button>
+        </div>
+        <div class="p-5 space-y-4">
+          <div><p class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Printed Name</p><p class="text-sm font-semibold text-gray-800">${esc(S.legalView.printedName)}</p></div>
+          <div><p class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Address</p><p class="text-sm text-gray-700">${esc(S.legalView.address)}</p></div>
+          <div><p class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Release Signature</p><img src="${S.legalView.signature}" class="w-full h-24 object-contain border border-gray-200 rounded-lg bg-gray-50"></div>
+          <div><p class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Terms Signature</p><img src="${S.legalView.termsSignature}" class="w-full h-24 object-contain border border-gray-200 rounded-lg bg-gray-50"></div>
+        </div>
+      </div>
+    </div>` : '';
+
+  if (!all.length) return `
+    ${modal}
+    <div class="bg-white rounded-xl border border-gray-100 shadow-sm p-16 text-center">
+      <div class="text-4xl mb-4">📋</div>
+      <h3 class="text-gray-700 font-semibold mb-1">No email addresses on file</h3>
+      <p class="text-gray-400 text-sm">Add emails when creating permits, or include an Email column in your bulk upload.</p>
+    </div>`;
+
+  const rows = all.map(p => {
+    const w = waiverMap[p.id];
+    const isSigned = !!w?.signedAt;
+    const isSent   = !!p.waiverSentAt && !isSigned;
+    const badge = isSigned
+      ? `<span class="inline-flex items-center gap-1 text-xs font-semibold text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-full">✓ Signed</span>`
+      : isSent
+      ? `<span class="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full">Sent — awaiting</span>`
+      : `<span class="inline-flex items-center gap-1 text-xs font-semibold text-gray-400 bg-gray-100 border border-gray-200 px-2.5 py-1 rounded-full">Not sent</span>`;
+    const actions = isSigned
+      ? `<button onclick="viewWaiver('${p.id}')" class="btn-outline flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium">${icoEye()} View</button>`
+      : `<button onclick="sendWaiverEmail('${p.id}')" ${!ejReady()?'disabled title="Configure EmailJS first"':''} class="btn-forest flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold ${!ejReady()?'opacity-40 cursor-not-allowed':''}">${icoMail()} ${isSent?'Resend':'Send waiver'}</button>`;
+    return `<tr class="border-b border-gray-50 hover:bg-gray-50/50 transition-colors">
+      <td class="py-3 pl-5 pr-4"><p class="text-sm font-semibold text-gray-800">${esc(p.holderName)}</p><p class="text-xs text-gray-400">${esc(p.email)}</p></td>
+      <td class="py-3 px-4 text-sm text-gray-600">${esc(p.ranchName)}</td>
+      <td class="py-3 px-4"><span class="font-mono text-xs font-bold text-forest-700 bg-forest-50 px-2 py-0.5 rounded">${esc(p.permitNumber)}</span></td>
+      <td class="py-3 px-4">${badge}</td>
+      <td class="py-3 pl-4 pr-5">${actions}</td>
+    </tr>`;
+  }).join('');
+
+  const sendAllBtn = ejReady() && pending > 0
+    ? `<button onclick="sendAllWaivers()" class="btn-forest flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold">${icoMail()} Send to ${pending} unsent</button>`
+    : '';
+
+  return `
+    ${modal}
+    ${setupBanner}
+    <div class="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+        <div>
+          <h2 class="text-sm font-bold text-gray-800">Release of Liability Waivers</h2>
+          <p class="text-xs text-gray-400 mt-0.5">
+            <span class="text-green-600 font-medium">${signed} signed</span>
+            ${sent ? ` · <span class="text-amber-600 font-medium">${sent} awaiting</span>` : ''}
+            ${pending ? ` · <span class="text-gray-500">${pending} not sent</span>` : ''}
+          </p>
+        </div>
+        ${sendAllBtn}
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead><tr class="bg-gray-50/60 border-b border-gray-100">
+            <th class="text-left py-2.5 pl-5 pr-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Holder</th>
+            <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Ranch</th>
+            <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Permit #</th>
+            <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Waiver Status</th>
+            <th class="text-left py-2.5 pl-4 pr-5 text-xs font-bold text-gray-400 uppercase tracking-wider">Action</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      ${noEmail.length ? `<p class="px-5 py-3 border-t border-gray-100 text-xs text-gray-400">${noEmail.length} permit${noEmail.length!==1?'s':''} hidden — no email address on file.</p>` : ''}
+    </div>`;
+}
+
+// ─── Email sending ─────────────────────────────────────────
+async function sendPermitEmail(id) {
+  const p = db.find(id); if (!p || !p.email) return;
+  if (!ejReady()) { toast('Configure EmailJS first — see Legal Forms tab'); return; }
+  try {
+    await emailjs.send(EJ_SERVICE_ID, EJ_PERMIT_TPL, {
+      to_name: p.holderName, to_email: p.email,
+      ranch_name: p.ranchName, permit_number: p.permitNumber,
+      permit_link: makeLink(p), expires_date: fmtDate(p.expiresDate),
+    }, EJ_PUBLIC_KEY);
+    toast(`Permit emailed to ${p.email}`);
+  } catch(e) { toast(`Send failed: ${e.text || e.message || 'unknown error'}`); }
+}
+
+async function sendWaiverEmail(id) {
+  const p = db.find(id); if (!p || !p.email) return;
+  if (!ejReady()) { toast('Configure EmailJS first — see Legal Forms tab'); return; }
+  try {
+    await emailjs.send(EJ_SERVICE_ID, EJ_WAIVER_TPL, {
+      to_name: p.holderName, to_email: p.email,
+      ranch_name: p.ranchName, waiver_link: makeWaiverLink(p),
+    }, EJ_PUBLIC_KEY);
+    await firestore.collection(COLL).doc(p.id).set({ waiverSentAt: new Date().toISOString() }, { merge: true });
+    toast(`Waiver sent to ${p.email}`);
+  } catch(e) { toast(`Send failed: ${e.text || e.message || 'unknown error'}`); }
+}
+
+async function sendAllWaivers() {
+  const waiverMap = {}; S.waivers.forEach(w => { waiverMap[w.permitId] = w; });
+  const unsent = db.all().filter(p => p.email && !p.waiverSentAt && !waiverMap[p.id]?.signedAt);
+  if (!unsent.length) return;
+  let sent = 0;
+  for (const p of unsent) {
+    try {
+      await emailjs.send(EJ_SERVICE_ID, EJ_WAIVER_TPL, {
+        to_name: p.holderName, to_email: p.email,
+        ranch_name: p.ranchName, waiver_link: makeWaiverLink(p),
+      }, EJ_PUBLIC_KEY);
+      await firestore.collection(COLL).doc(p.id).set({ waiverSentAt: new Date().toISOString() }, { merge: true });
+      sent++;
+    } catch(e) { console.error('Waiver send failed for', p.holderName, e); }
+  }
+  toast(`${sent} waiver${sent!==1?'s':''} sent`);
+}
+
+function viewWaiver(id) {
+  S.legalView = S.waivers.find(w => w.permitId === id) || null;
+  renderAdmin();
+}
+function closeLegalModal() { S.legalView = null; renderAdmin(); }
+
+// ─── Signature pad ─────────────────────────────────────────
+function initSignaturePad(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return null;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width  = rect.width  * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.strokeStyle = '#1C2D1C'; ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  let drawing = false, lx = 0, ly = 0;
+  function pos(e) {
+    const r = canvas.getBoundingClientRect();
+    const t = e.touches?.[0];
+    return { x: (t?.clientX ?? e.clientX) - r.left, y: (t?.clientY ?? e.clientY) - r.top };
+  }
+  canvas.addEventListener('mousedown', e => { drawing = true; const p = pos(e); lx=p.x; ly=p.y; });
+  canvas.addEventListener('mousemove', e => { if (!drawing) return; const p=pos(e); ctx.beginPath(); ctx.moveTo(lx,ly); ctx.lineTo(p.x,p.y); ctx.stroke(); lx=p.x; ly=p.y; });
+  canvas.addEventListener('mouseup', () => drawing=false);
+  canvas.addEventListener('mouseleave', () => drawing=false);
+  canvas.addEventListener('touchstart', e => { e.preventDefault(); drawing=true; const p=pos(e); lx=p.x; ly=p.y; }, {passive:false});
+  canvas.addEventListener('touchmove',  e => { e.preventDefault(); if(!drawing) return; const p=pos(e); ctx.beginPath(); ctx.moveTo(lx,ly); ctx.lineTo(p.x,p.y); ctx.stroke(); lx=p.x; ly=p.y; }, {passive:false});
+  canvas.addEventListener('touchend', () => drawing=false);
+  return {
+    clear: () => ctx.clearRect(0, 0, rect.width, rect.height),
+    isEmpty: () => { const d=ctx.getImageData(0,0,canvas.width,canvas.height).data; for(let i=3;i<d.length;i+=4){if(d[i]>10)return false;} return true; },
+    toDataURL: () => canvas.toDataURL('image/png'),
+  };
+}
+
+function clearSig(key) { sigPads[key]?.clear(); }
+
+// ─── Waiver signing page (customer-facing) ────────────────
+function renderWaiverSigning(p) {
+  document.title = `Release of Liability — ${p.ranchName || 'Wight Cattle, LLC'}`;
+  const now = new Date();
+  const day = now.getDate();
+  const month = now.toLocaleDateString('en-US',{month:'long'});
+  document.getElementById('app').innerHTML = `
+    <div style="background:#EAE7DF;min-height:100vh;padding:24px 16px 48px">
+      <div class="max-w-2xl mx-auto">
+        <div style="background:#1C2D1C" class="rounded-t-2xl px-6 py-5 flex items-center gap-3">
+          ${bird(36)}
+          <div><p class="text-white font-bold text-base leading-snug">${esc(p.ranchName) || 'Wight Cattle, LLC'}</p><p style="color:#6A9E5E" class="text-xs font-bold uppercase tracking-widest mt-0.5">Release of Liability</p></div>
+        </div>
+
+        <div class="bg-white px-6 py-6 shadow-sm">
+          <h1 class="text-base font-bold text-gray-900 text-center mb-5 leading-snug">Release of Liability and Acknowledgment and Acceptance<br>of Dangers, Risks and Hazards of Hunting Lease</h1>
+          <div class="text-sm text-gray-700 leading-relaxed space-y-3">
+            <p>By signing this agreement, I hereby acknowledge that I have knowingly and willingly entered a Hunting Lease Agreement, or become a party bound by the terms and conditions of a Hunting Lease Agreement by and between <strong>${esc(p.holderName)}</strong>, et al. (hunter, hereinafter the Lessee, whether one or more) and Wight Cattle, LLC, et al. (landowner/lease manager, hereinafter the Lessor, whether one or more).</p>
+            <p>I further acknowledge and understand that no warranty, either express or implied, is made by the Lessor as to the condition of the hunting lease (hereinafter the leased premises) located in Crane and Upton County, Texas, or of any roads, buildings, gates or other improvements located thereon. This document serves to warn me that dangerous conditions, risks and hazards do exist. My presence and activities on the leased premises expose both me and my property to dangerous conditions, risks and hazards, including but not limited to: poisonous snakes, insects and spiders; blinds and tree stands, whether or not erected by Lessor; erosion and general condition of the land, both on and off roadways or senderos, creating rough, hazardous and dangerous driving and walking conditions; animals both wild and domestic that may be diseased and/or potentially dangerous; deep water; persons with firearms both on or off the leased premises; and the use of vehicles. I hereby state that I expressly assume all such dangers, risks and hazards.</p>
+            <p>In consideration for the right to enter the leased premises, I hereby release and agree to protect, indemnify and hold harmless the Lessor and his or her respective heirs, agents, employees and assigns from and against any and all claims, demands, causes of action and damages, including attorneys' fees, resulting from any accident, incident or occurrence arising out of, incidental to or in any way resulting from the use of the leased premises and all improvements thereon, whether or not caused by the Lessor's negligence or gross negligence. This release applies during the time that I am permitted on the leased premises. I hereby further covenant and agree that I, my heirs, successors and assigns will not make any claim or institute any suit or action at law or in equity against the Lessor or his or her respective heirs, agents, representatives, employees, successors or assigns by reason of conditions of the leased premises or activities occurring thereon.</p>
+            <p>I hereby further understand and agree to abide by all the rules, provisions and terms of this Hunting Lease Agreement as set forth by the Lessor. It is understood that the Lessee will be in breach of this agreement in the event that the Lessee fails to follow those rules and terms. I further agree to abide by all state game laws as set forth by the Texas Parks &amp; Wildlife Department. In addition to state game laws, Lessee agrees to abide by all local, state, and federal laws while on the leased premises. As the Lessee, I understand that failing to do so may void this agreement, and the agreement may then be cancelled at the sole discretion of the Lessor. In that unlikely event, I further agree to forfeit any money paid and all present and future claims to the leased premises in regards to the remaining term of the original agreement.</p>
+            <p>As used in this release, the terms I, my person and myself include minors in my care while on the leased premises.</p>
+          </div>
+
+          <p class="text-sm text-gray-700 mt-6 mb-4">Date and signed this <strong>${day}</strong> day of <strong>${month}</strong>, ${now.getFullYear()}.</p>
+
+          <div class="grid grid-cols-2 gap-4 mb-4">
+            <div>
+              <label class="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-1.5">Lessee's Signature <span class="text-red-400">*</span></label>
+              <canvas id="sig-main" class="sig-canvas"></canvas>
+              <button onclick="clearSig('main')" class="mt-1 text-xs text-gray-400 hover:text-gray-600">Clear</button>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-1.5">Lessee's Printed Name <span class="text-red-400">*</span></label>
+              <input id="w-name" type="text" placeholder="Full legal name" class="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg bg-white mt-0.5">
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-1.5">Lessee's Address <span class="text-red-400">*</span></label>
+            <input id="w-address" type="text" placeholder="Street, City, State, ZIP" class="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg bg-white">
+          </div>
+        </div>
+
+        <div class="bg-white px-6 py-6 mt-px shadow-sm">
+          <p class="text-sm text-gray-700 leading-relaxed mb-4">I lessee, <strong>${esc(p.holderName)}</strong>, agree to the following terms set forth by lessor, Wight Cattle, LLC.:</p>
+          <p class="text-sm font-semibold text-gray-800 mb-2">Terms:</p>
+          <ol class="text-sm text-gray-700 space-y-1.5 list-decimal list-inside mb-5">
+            <li>Have issued permit on person at all times.</li>
+            <li>Stay in designated/assigned hunting area.</li>
+            <li>Pick up all trash.</li>
+            <li>Do not tamper with water source.</li>
+            <li>Keep all gates the way you find them.</li>
+          </ol>
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-1.5">Lessee Signature <span class="text-red-400">*</span></label>
+              <canvas id="sig-terms" class="sig-canvas"></canvas>
+              <button onclick="clearSig('terms')" class="mt-1 text-xs text-gray-400 hover:text-gray-600">Clear</button>
+            </div>
+            <div class="flex flex-col justify-center">
+              <label class="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-1.5">Date</label>
+              <p class="text-sm text-gray-700">${now.toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})}</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-white px-6 py-5 rounded-b-2xl shadow-sm mt-px">
+          <button onclick="submitWaiver('${esc(encode(p))}')" class="w-full btn-forest py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            Submit Signed Waiver
+          </button>
+          <p class="text-center text-xs text-gray-400 mt-3">By submitting you confirm the signature above is your own.</p>
+        </div>
+      </div>
+    </div>`;
+
+  requestAnimationFrame(() => {
+    sigPads.main  = initSignaturePad('sig-main');
+    sigPads.terms = initSignaturePad('sig-terms');
+    waiverState.inProgress = true;
+  });
+}
+
+async function submitWaiver(encodedPermit) {
+  const p = decode(encodedPermit); if (!p) return;
+  const name    = document.getElementById('w-name')?.value.trim();
+  const address = document.getElementById('w-address')?.value.trim();
+  if (!name)    { toast('Please enter your printed name'); return; }
+  if (!address) { toast('Please enter your address'); return; }
+  if (sigPads.main?.isEmpty())  { toast('Please sign the release form'); return; }
+  if (sigPads.terms?.isEmpty()) { toast('Please sign the terms agreement'); return; }
+  const btn = document.querySelector('button[onclick^="submitWaiver"]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Submitting…'; }
+  try {
+    const now = new Date().toISOString();
+    await firestore.collection(WAIVER_COLL).doc(p.id).set({
+      permitId: p.id, holderName: p.holderName, email: p.email || '',
+      ranchName: p.ranchName, permitNumber: p.permitNumber,
+      signedAt: now, printedName: name, address,
+      signature: sigPads.main.toDataURL(),
+      termsSignature: sigPads.terms.toDataURL(), termsSignedAt: now,
+    });
+    await firestore.collection(COLL).doc(p.id).set({ waiverSignedAt: now }, { merge: true });
+    waiverState.inProgress = false;
+    waiverState.submitted  = true;
+    renderWaiverSuccess(p);
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Submit Signed Waiver'; }
+    toast('Submission failed — please try again');
+  }
+}
+
+function renderWaiverSuccess(p) {
+  document.title = 'Waiver Submitted';
+  document.getElementById('app').innerHTML = `
+    <div style="background:#EAE7DF;min-height:100vh" class="flex items-center justify-center p-4">
+      <div class="bg-white rounded-2xl p-10 max-w-sm w-full text-center permit-shadow">
+        <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+          <svg class="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+        </div>
+        <h2 class="text-xl font-bold text-gray-800 mb-2">Waiver Submitted</h2>
+        <p class="text-gray-500 text-sm leading-relaxed">Your Release of Liability for <strong>${esc(p.ranchName)}</strong> has been signed and recorded.</p>
+        <p class="text-gray-400 text-xs mt-4">You may close this page.</p>
+      </div>
+    </div>`;
+}
+
 // ─── Customer View ────────────────────────────────────────
 function renderCustomer(p) {
   document.title = `${p.ranchName || 'Bird Hunt'} — Permit ${p.permitNumber || ''}`;
@@ -823,6 +1179,7 @@ const icoEdit  = () => svg(`<path stroke-linecap="round" stroke-linejoin="round"
 const icoLink  = () => svg(`<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/>`);
 const icoEye   = () => svg(`<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>`);
 const icoSlash = () => svg(`<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/>`);
+const icoMail  = () => svg(`<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>`);
 const icoTrash = () => svg(`<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>`);
 
 // ─── Actions ──────────────────────────────────────────────
@@ -927,6 +1284,11 @@ document.getElementById('app').innerHTML = '<div style="display:flex;align-items
 firestore.collection(COLL).orderBy('createdAt', 'asc').onSnapshot(snapshot => {
   S.permits = snapshot.docs.map(d => d.data());
   render();
+});
+firestore.collection(WAIVER_COLL).onSnapshot(snapshot => {
+  S.waivers = snapshot.docs.map(d => d.data());
+  // Only re-render if in admin view — never interrupt an in-progress signature
+  if (!new URLSearchParams(location.search).get('w')) renderAdmin();
 });
 </script>
 </body>
