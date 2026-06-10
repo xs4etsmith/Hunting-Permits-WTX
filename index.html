@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Bird Hunt Permit Hub</title>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -154,10 +155,11 @@ const S = {
   viewerPermit: null,
   f: null,
   permits: [],
+  upload: { rows: null, results: null, generating: false, parseError: null },
 };
 
 function freshForm() {
-  return { ranchName:'', permitNumber: nextNum(), holderName:'', issueDate: today(), expiresDate:'', species:'', coords:[{lat:'',lng:'',label:''}] };
+  return { ranchName:'', permitNumber: nextNum(), holderName:'', email:'', issueDate: today(), expiresDate:'', species:'', coords:[{lat:'',lng:'',label:''}] };
 }
 S.f = freshForm();
 
@@ -176,15 +178,15 @@ function renderAdmin() {
         <div class="max-w-4xl mx-auto px-4 h-14 flex items-center gap-3">
           <div class="flex items-center gap-2.5 mr-1">${bird(32)}<span class="text-white font-semibold text-[15px] tracking-tight">Bird Hunt Permit Hub</span></div>
           <nav class="flex items-center gap-0.5">
-            ${['new','issued','viewer'].map((t,_,arr) => {
-              const labels = {'new':'New permit','issued':'Issued permits','viewer':'Viewer'};
+            ${['new','issued','viewer','upload'].map((t,_,arr) => {
+              const labels = {'new':'New permit','issued':'Issued permits','viewer':'Viewer','upload':'Bulk upload'};
               return `<button onclick="setTab('${t}')" class="tab-btn ${S.tab===t?'tab-active':'tab-inactive'}">${labels[t]}</button>`;
             }).join('')}
           </nav>
         </div>
       </header>
       <main class="max-w-4xl mx-auto px-4 py-8">
-        ${S.tab==='new' ? tabNew() : S.tab==='issued' ? tabIssued() : tabViewer()}
+        ${S.tab==='new' ? tabNew() : S.tab==='issued' ? tabIssued() : S.tab==='viewer' ? tabViewer() : tabUpload()}
       </main>
     </div>`;
 }
@@ -251,11 +253,19 @@ function tabNew() {
             class="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg bg-white">
         </div>
       </div>
-      <div class="mb-4">
-        <label class="block text-sm font-medium text-gray-700 mb-1.5">Permit holder name <span class="text-red-400">*</span></label>
-        <input id="fi-holder" type="text" value="${esc(f.holderName)}" placeholder="John Smith"
-          oninput="S.f.holderName=this.value"
-          class="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg bg-white">
+      <div class="grid grid-cols-2 gap-4 mb-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1.5">Permit holder name <span class="text-red-400">*</span></label>
+          <input id="fi-holder" type="text" value="${esc(f.holderName)}" placeholder="John Smith"
+            oninput="S.f.holderName=this.value"
+            class="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg bg-white">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1.5">Email <span class="text-gray-400 font-normal text-xs">(optional)</span></label>
+          <input id="fi-email" type="email" value="${esc(f.email||'')}" placeholder="john@example.com"
+            oninput="S.f.email=this.value"
+            class="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg bg-white">
+        </div>
       </div>
       <div class="grid grid-cols-2 gap-4 mb-4">
         <div>
@@ -326,7 +336,7 @@ function tabIssued() {
       : 'bg-red-50 text-red-600 border-red-200';
     return `<tr class="border-b border-gray-50 hover:bg-gray-50/50 transition-colors group">
       <td class="py-3 pl-5 pr-4"><span class="font-mono text-xs font-bold text-forest-700 bg-forest-50 px-2 py-0.5 rounded">${esc(p.permitNumber)}</span></td>
-      <td class="py-3 px-4 text-sm font-semibold text-gray-800">${esc(p.holderName)}</td>
+      <td class="py-3 px-4"><p class="text-sm font-semibold text-gray-800 leading-snug">${esc(p.holderName)}</p>${p.email?`<p class="text-xs text-gray-400 mt-0.5">${esc(p.email)}</p>`:''}</td>
       <td class="py-3 px-4 text-sm text-gray-600">${esc(p.ranchName)}</td>
       <td class="py-3 px-4 text-xs text-gray-500">${fmtDate(p.issueDate)}</td>
       <td class="py-3 px-4 text-xs text-gray-500">${fmtDate(p.expiresDate)}</td>
@@ -469,6 +479,332 @@ function permitCard(p) {
     </div>`;
 }
 
+// ─── Tab: Bulk Upload ─────────────────────────────────────
+function tabUpload() {
+  const u = S.upload;
+
+  // ── Results view ──
+  if (u.results) {
+    const ok = u.results.filter(r => !r.error);
+    const bad = u.results.filter(r => r.error);
+    const rows = u.results.map((r, i) => r.error
+      ? `<tr class="border-b border-gray-50">
+           <td class="py-2.5 pl-5 pr-4 text-xs text-gray-400">${i+1}</td>
+           <td class="py-2.5 px-4 text-sm text-gray-700">${esc(r.fields?.holderName||'—')}</td>
+           <td class="py-2.5 px-4 text-sm text-gray-600">${esc(r.fields?.ranchName||'—')}</td>
+           <td class="py-2.5 px-4 text-xs text-red-500 col-span-2">${esc(r.error)}</td>
+           <td class="py-2.5 pl-4 pr-5"></td>
+         </tr>`
+      : `<tr class="border-b border-gray-50 hover:bg-gray-50/50">
+           <td class="py-2.5 pl-5 pr-4 text-xs text-gray-400">${i+1}</td>
+           <td class="py-2.5 px-4"><p class="text-sm font-semibold text-gray-800">${esc(r.permit.holderName)}</p>${r.permit.email?`<p class="text-xs text-gray-400">${esc(r.permit.email)}</p>`:''}</td>
+           <td class="py-2.5 px-4 text-sm text-gray-600">${esc(r.permit.ranchName)}</td>
+           <td class="py-2.5 px-4"><span class="font-mono text-xs font-bold text-forest-700 bg-forest-50 px-2 py-0.5 rounded">${esc(r.permit.permitNumber)}</span></td>
+           <td class="py-2.5 px-4 text-xs text-gray-500">${fmtDate(r.permit.expiresDate)}</td>
+           <td class="py-2.5 pl-4 pr-5">
+             <button onclick="copyText('${esc(r.link)}','Link copied!')" class="btn-forest flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold">${icoLink()} Copy link</button>
+           </td>
+         </tr>`
+    ).join('');
+    return `
+      <div class="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div>
+            <h2 class="text-sm font-bold text-gray-800">${ok.length} permit${ok.length!==1?'s':''} generated</h2>
+            <p class="text-xs text-gray-400 mt-0.5"><span class="text-green-600 font-medium">${ok.length} success</span>${bad.length?` · <span class="text-red-500 font-medium">${bad.length} failed</span>`:''}</p>
+          </div>
+          <div class="flex gap-2">
+            ${ok.length ? `<button onclick="copyAllPermitLinks()" class="btn-forest flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold">${icoLink()} Copy all links</button>` : ''}
+            <button onclick="resetUpload()" class="btn-outline flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium">Upload another file</button>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full">
+            <thead><tr class="bg-gray-50/60 border-b border-gray-100">
+              <th class="text-left py-2.5 pl-5 pr-4 text-xs font-bold text-gray-400 uppercase tracking-wider">#</th>
+              <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Holder</th>
+              <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Ranch</th>
+              <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Permit #</th>
+              <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Expires</th>
+              <th class="text-left py-2.5 pl-4 pr-5 text-xs font-bold text-gray-400 uppercase tracking-wider">Link</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  // ── Generating progress ──
+  if (u.generating) {
+    const done = (u.results||[]).length;
+    const total = (u.rows||[]).filter(r => r.holderName && r.ranchName && r.expiresDate).length;
+    const pct = total ? Math.round(done/total*100) : 0;
+    return `
+      <div class="bg-white rounded-xl border border-gray-100 shadow-sm p-12 text-center">
+        <div class="w-10 h-10 border-4 border-forest-200 border-t-forest-600 rounded-full animate-spin mx-auto mb-4"></div>
+        <p class="text-sm font-semibold text-gray-700 mb-1">Generating permits…</p>
+        <p class="text-xs text-gray-400 mb-4">${done} of ${total} complete</p>
+        <div class="w-64 mx-auto bg-gray-100 rounded-full h-2 overflow-hidden">
+          <div style="width:${pct}%;background:#1C2D1C;transition:width 0.3s" class="h-full rounded-full"></div>
+        </div>
+      </div>`;
+  }
+
+  // ── Preview table ──
+  if (u.rows) {
+    const valid = u.rows.filter(r => r.holderName && r.ranchName && r.expiresDate);
+    const skipped = u.rows.length - valid.length;
+    const previewRows = u.rows.map((r, i) => {
+      const missing = [];
+      if (!r.holderName) missing.push('Name');
+      if (!r.ranchName) missing.push('Ranch');
+      if (!r.expiresDate) missing.push('Expiration date');
+      const isValid = !missing.length;
+      return `<tr class="border-b border-gray-50 ${isValid?'hover:bg-gray-50/50':'bg-red-50/30'}">
+        <td class="py-2.5 pl-5 pr-4 text-xs text-gray-400">${i+1}</td>
+        <td class="py-2.5 px-4"><p class="text-sm font-semibold text-gray-800 leading-snug">${esc(r.holderName||'—')}</p>${r.email?`<p class="text-xs text-gray-400">${esc(r.email)}</p>`:''}</td>
+        <td class="py-2.5 px-4 text-sm text-gray-600">${esc(r.ranchName||'—')}</td>
+        <td class="py-2.5 px-4 text-xs text-gray-500">${r.issueDate ? fmtDate(r.issueDate) : '—'}</td>
+        <td class="py-2.5 px-4 text-xs ${r.expiresDate?'text-gray-500':'text-red-400 font-medium'}">${r.expiresDate ? fmtDate(r.expiresDate) : 'Missing'}</td>
+        <td class="py-2.5 px-4 text-xs text-gray-500">${r.coords.length ? `${r.coords.length} point${r.coords.length!==1?'s':''}` : '—'}</td>
+        <td class="py-2.5 pl-4 pr-5">
+          ${isValid
+            ? `<span class="inline-flex items-center gap-1 text-xs font-semibold text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">✓ Ready</span>`
+            : `<span class="inline-flex items-center gap-1 text-xs font-semibold text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full" title="Missing: ${missing.join(', ')}">⚠ Skip</span>`}
+        </td>
+      </tr>`;
+    }).join('');
+    return `
+      <div class="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div>
+            <h2 class="text-sm font-bold text-gray-800">Preview — ${u.rows.length} row${u.rows.length!==1?'s':''} found</h2>
+            <p class="text-xs text-gray-400 mt-0.5"><span class="text-green-600 font-medium">${valid.length} will generate</span>${skipped?` · <span class="text-amber-600 font-medium">${skipped} skipped (missing required fields)</span>`:''}</p>
+          </div>
+          <div class="flex gap-2">
+            <button onclick="resetUpload()" class="btn-outline flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium">Upload different file</button>
+            ${valid.length ? `<button onclick="bulkGenerate()" class="btn-forest flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/></svg>
+              Generate ${valid.length} permit${valid.length!==1?'s':''}
+            </button>` : ''}
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full">
+            <thead><tr class="bg-gray-50/60 border-b border-gray-100">
+              <th class="text-left py-2.5 pl-5 pr-4 text-xs font-bold text-gray-400 uppercase tracking-wider">#</th>
+              <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Holder</th>
+              <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Ranch</th>
+              <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Issue Date</th>
+              <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Expires</th>
+              <th class="text-left py-2.5 px-4 text-xs font-bold text-gray-400 uppercase tracking-wider">Coords</th>
+              <th class="text-left py-2.5 pl-4 pr-5 text-xs font-bold text-gray-400 uppercase tracking-wider">Status</th>
+            </tr></thead>
+            <tbody>${previewRows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  // ── Drop zone ──
+  const err = u.parseError;
+  return `
+    <div class="max-w-2xl mx-auto">
+      <div class="bg-white rounded-xl border border-gray-100 shadow-sm p-6 mb-4">
+        <div class="flex items-center gap-2 mb-5">
+          <svg class="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+          <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">Bulk Upload</span>
+        </div>
+        ${err ? `<div class="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600">${esc(err)}</div>` : ''}
+        <div
+          ondragover="event.preventDefault();this.classList.add('border-forest-400','bg-forest-50/30')"
+          ondragleave="this.classList.remove('border-forest-400','bg-forest-50/30')"
+          ondrop="event.preventDefault();this.classList.remove('border-forest-400','bg-forest-50/30');handleUploadDrop(event)"
+          class="border-2 border-dashed border-gray-200 rounded-xl p-10 text-center transition-all cursor-pointer hover:border-forest-300 hover:bg-forest-50/20"
+          onclick="document.getElementById('bulk-file-input').click()">
+          <input id="bulk-file-input" type="file" accept=".xlsx,.xls,.csv" class="hidden" onchange="handleUploadInput(event)">
+          <svg class="w-8 h-8 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          <p class="text-sm font-semibold text-gray-600 mb-1">Drop your file here, or click to browse</p>
+          <p class="text-xs text-gray-400">Accepts .xlsx, .xls (Excel) and .csv — first row must be column headers</p>
+        </div>
+        <div class="mt-4 flex items-center justify-between">
+          <p class="text-xs text-gray-400">Google Sheets: File → Download → .xlsx or .csv</p>
+          <button onclick="downloadPermitTemplate()" class="flex items-center gap-1.5 text-xs text-forest-600 hover:text-forest-800 font-medium transition-colors">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+            Download template
+          </button>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl border border-gray-100 shadow-sm p-5">
+        <p class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Column guide</p>
+        <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-xs text-gray-600">
+          <div><span class="font-semibold text-gray-800">Name</span> <span class="text-gray-400">(or Holder, Hunter)</span> <span class="text-red-400 font-medium">*</span></div>
+          <div><span class="font-semibold text-gray-800">Ranch</span> <span class="text-gray-400">(or Ranch Name, Property)</span> <span class="text-red-400 font-medium">*</span></div>
+          <div><span class="font-semibold text-gray-800">Expiration Date</span> <span class="text-gray-400">(or Expires, End Date)</span> <span class="text-red-400 font-medium">*</span></div>
+          <div><span class="font-semibold text-gray-800">Email</span> <span class="text-gray-400">optional</span></div>
+          <div><span class="font-semibold text-gray-800">Issue Date</span> <span class="text-gray-400">defaults to today</span></div>
+          <div><span class="font-semibold text-gray-800">Species / Notes</span> <span class="text-gray-400">optional</span></div>
+          <div class="col-span-2"><span class="font-semibold text-gray-800">Coordinates</span> <span class="text-gray-400">— single "lat,lng" or multiple separated by | e.g. <code class="bg-gray-100 px-1 rounded">32.71,-97.32:North Field|33.12,-98.56:South</code></span></div>
+          <div class="col-span-2 text-gray-400">Or use separate <span class="font-semibold text-gray-600">Lat</span> and <span class="font-semibold text-gray-600">Lng</span> columns for a single coordinate.</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ─── Upload utilities ──────────────────────────────────────
+function colKey(s) { return String(s).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
+
+function mapCol(row, ...keys) {
+  for (const k of keys) { const v = row[k]; if (v !== undefined && v !== '') return String(v).trim(); }
+  return '';
+}
+
+function normalizeDate(raw) {
+  if (!raw) return '';
+  const s = String(raw).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const mdy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (mdy) return `${mdy[3]}-${mdy[1].padStart(2,'0')}-${mdy[2].padStart(2,'0')}`;
+  const mdyS = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2})$/);
+  if (mdyS) { const y = +mdyS[3] < 50 ? `20${mdyS[3]}` : `19${mdyS[3]}`; return `${y}-${mdyS[1].padStart(2,'0')}-${mdyS[2].padStart(2,'0')}`; }
+  const d = new Date(s); if (!isNaN(d)) return d.toISOString().split('T')[0];
+  return s;
+}
+
+function parseCoordStr(raw) {
+  if (!raw) return [];
+  return String(raw).split(/[|;\n]+/).map(s => s.trim()).filter(Boolean).map(part => {
+    const ci = part.lastIndexOf(':');
+    let cp = part, label = '';
+    if (ci > 0 && isNaN(Number(part.slice(ci+1).trim()))) { label = part.slice(ci+1).trim(); cp = part.slice(0,ci).trim(); }
+    const nums = cp.split(',').map(x => x.trim());
+    return { lat: nums[0]||'', lng: nums[1]||'', label: label || nums[2]||'' };
+  });
+}
+
+function normalizeRow(raw) {
+  const r = {};
+  for (const k of Object.keys(raw)) r[colKey(k)] = String(raw[k]??'').trim();
+  return r;
+}
+
+function rowToFields(r) {
+  const holderName = mapCol(r,'name','holder','permit holder','hunter','hunter name','full name','person');
+  const email      = mapCol(r,'email','email address','e mail','e-mail');
+  const ranchName  = mapCol(r,'ranch','ranch name','property','location','property name','farm','land','hunt area');
+  const coordsRaw  = mapCol(r,'coordinates','coords','gps','lat lng','latlng','coordinate','gps coordinates');
+  const lat        = mapCol(r,'lat','latitude');
+  const lng        = mapCol(r,'lng','lon','long','longitude');
+  const coordLabel = mapCol(r,'label','area','area label','coord label');
+  const issueDate  = normalizeDate(mapCol(r,'issue date','issued','start','start date','issue','date issued','issued date'));
+  const expiresDate= normalizeDate(mapCol(r,'expiration','expiration date','expires','expiry','end','end date','expire date','exp date','exp'));
+  const species    = mapCol(r,'species','notes','species notes','species / notes','species/notes','hunt species','game');
+  const permitNum  = mapCol(r,'permit number','permit #','permit no','permit num','permit');
+  let coords = coordsRaw ? parseCoordStr(coordsRaw) : (lat||lng) ? [{lat,lng,label:coordLabel}] : [];
+  return { holderName, email, ranchName, coords, issueDate: issueDate||today(), expiresDate, species, permitNum };
+}
+
+function parseCSVText(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (!lines.length) return [];
+  function parseRow(line) {
+    const res=[]; let cur='', inQ=false;
+    for (let i=0;i<line.length;i++) {
+      const c=line[i];
+      if (c==='"') { if (inQ&&line[i+1]==='"'){cur+='"';i++;}else inQ=!inQ; }
+      else if (c===','&&!inQ){res.push(cur.trim());cur='';}
+      else cur+=c;
+    }
+    res.push(cur.trim()); return res;
+  }
+  const headers = parseRow(lines[0]).map(colKey);
+  const rows=[];
+  for (let i=1;i<lines.length;i++){
+    if (!lines[i].trim()) continue;
+    const cells=parseRow(lines[i]); const row={};
+    headers.forEach((h,j)=>{row[h]=cells[j]??'';});
+    rows.push(row);
+  }
+  return rows;
+}
+
+function parseXLSXBuffer(buf) {
+  const wb = XLSX.read(buf,{type:'array',cellDates:true});
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(ws,{raw:false,dateNF:'yyyy-mm-dd'}).map(normalizeRow);
+}
+
+async function processUploadFile(file) {
+  S.upload.parseError = null;
+  const name = file.name.toLowerCase();
+  try {
+    let raw;
+    if (name.endsWith('.csv')) { raw = parseCSVText(await file.text()); }
+    else if (name.endsWith('.xlsx')||name.endsWith('.xls')) {
+      if (typeof XLSX==='undefined') throw new Error('Excel library not loaded — please refresh and try again.');
+      raw = parseXLSXBuffer(await file.arrayBuffer());
+    } else { throw new Error('Unsupported file type. Please upload .xlsx, .xls, or .csv.'); }
+    if (!raw.length) throw new Error('No data rows found. Make sure the file has a header row followed by data.');
+    S.upload.rows = raw.map(rowToFields);
+  } catch(e) { S.upload.parseError = e.message; }
+  renderAdmin();
+}
+
+function handleUploadDrop(e) { const f=e.dataTransfer.files[0]; if(f) processUploadFile(f); }
+function handleUploadInput(e) { const f=e.target.files[0]; if(f) processUploadFile(f); }
+function resetUpload() { S.upload={ rows:null, results:null, generating:false, parseError:null }; renderAdmin(); }
+
+async function bulkGenerate() {
+  const valid = (S.upload.rows||[]).filter(r => r.holderName && r.ranchName && r.expiresDate);
+  if (!valid.length) return;
+  S.upload.generating = true;
+  S.upload.results = [];
+  renderAdmin();
+  const yr = new Date().getFullYear();
+  const base = db.all().filter(p => (p.permitNumber||'').includes(`-${yr}-`)).length;
+  for (let i=0; i<valid.length; i++) {
+    const fields = valid[i];
+    const n = base + i + 1;
+    const permitNumber = fields.permitNum || `BP-${yr}-${String(n).padStart(3,'0')}`;
+    try {
+      const permit = {
+        id: crypto.randomUUID(), permitNumber,
+        ranchName: fields.ranchName, holderName: fields.holderName,
+        email: fields.email, issueDate: fields.issueDate,
+        expiresDate: fields.expiresDate, species: fields.species,
+        coords: fields.coords.filter(c => c.lat||c.lng),
+        deactivated: false, createdAt: new Date().toISOString(),
+      };
+      await db.upsert(permit);
+      S.upload.results.push({ permit, link: makeLink(permit), error: null });
+    } catch(e) {
+      S.upload.results.push({ permit:null, fields, error: e.message||'Failed to save' });
+    }
+    renderAdmin();
+  }
+  S.upload.generating = false;
+  renderAdmin();
+  const ok = S.upload.results.filter(r=>!r.error).length;
+  toast(`${ok} permit${ok!==1?'s':''} generated!`, 3200);
+}
+
+function copyAllPermitLinks() {
+  const lines = (S.upload.results||[]).filter(r=>!r.error)
+    .map(r=>`${r.permit.holderName} — ${r.permit.ranchName}\n${r.link}`).join('\n\n');
+  copyText(lines, 'All permit links copied!');
+}
+
+function downloadPermitTemplate() {
+  const csv = [
+    'Name,Email,Ranch,Coordinates,Issue Date,Expiration Date,Species/Notes',
+    'John Smith,john@email.com,Rolling Plains Ranch,"32.7157,-97.3297",2026-10-01,2027-01-15,Quail',
+    'Jane Doe,jane@email.com,West Texas Acres,"33.1234,-98.5678:North Field|32.9876,-97.1234:South Pasture",2026-10-01,2027-01-15,Pheasant',
+  ].join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'permit-template.csv'; a.click();
+}
+
 // ─── Customer View ────────────────────────────────────────
 function renderCustomer(p) {
   document.title = `${p.ranchName || 'Bird Hunt'} — Permit ${p.permitNumber || ''}`;
@@ -511,8 +847,9 @@ function updCoord(i,f,v) { S.f.coords[i][f] = v; }
 function syncFromDOM() {
   const g = id => document.getElementById(id)?.value ?? '';
   S.f.ranchName = g('fi-ranch'); S.f.permitNumber = g('fi-num');
-  S.f.holderName = g('fi-holder'); S.f.issueDate = g('fi-issue');
-  S.f.expiresDate = g('fi-exp'); S.f.species = g('fi-species');
+  S.f.holderName = g('fi-holder'); S.f.email = g('fi-email');
+  S.f.issueDate = g('fi-issue'); S.f.expiresDate = g('fi-exp');
+  S.f.species = g('fi-species');
 }
 
 async function submitForm() {
@@ -528,6 +865,7 @@ async function submitForm() {
     permitNumber: f.permitNumber.trim() || nextNum(),
     ranchName: f.ranchName.trim(),
     holderName: f.holderName.trim(),
+    email: (f.email || '').trim(),
     issueDate: f.issueDate,
     expiresDate: f.expiresDate,
     species: f.species.trim(),
@@ -550,7 +888,7 @@ function doEdit(id) {
   S.editId = id;
   S.f = {
     ranchName: p.ranchName, permitNumber: p.permitNumber,
-    holderName: p.holderName, issueDate: p.issueDate,
+    holderName: p.holderName, email: p.email || '', issueDate: p.issueDate,
     expiresDate: p.expiresDate, species: p.species || '',
     coords: (p.coords||p.coordinates||[]).length ? [...(p.coords||p.coordinates)] : [{lat:'',lng:'',label:''}],
   };
