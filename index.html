@@ -995,8 +995,57 @@ async function sendAllWaivers() {
 }
 
 function viewWaiver(id) {
-  S.legalView = S.waivers.find(w => w.permitId === id) || null;
-  renderAdmin();
+  const w = S.waivers.find(x => x.permitId === id);
+  if (!w) return;
+  const signed = new Date(w.signedAt).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
+  const win = window.open('', '_blank');
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Signed Waiver — ${w.holderName}</title>
+  <style>
+    body{font-family:Georgia,serif;max-width:720px;margin:40px auto;padding:0 24px 60px;color:#111;line-height:1.7}
+    h1{font-size:18px;text-align:center;margin-bottom:4px}
+    h2{font-size:14px;text-align:center;font-weight:normal;margin-bottom:28px}
+    p{font-size:13px;margin:0 0 12px}
+    .label{font-size:10px;font-weight:bold;text-transform:uppercase;letter-spacing:.08em;color:#555;margin-bottom:4px}
+    .sig-row{display:grid;grid-template-columns:1fr 1fr;gap:32px;margin:24px 0}
+    .sig-box img{width:100%;height:90px;object-fit:contain;border:1px solid #ccc;border-radius:4px;background:#fafafa}
+    .field{border-bottom:1px solid #999;padding-bottom:2px;min-height:22px;font-size:13px}
+    hr{border:none;border-top:1px solid #ccc;margin:28px 0}
+    .footer{margin-top:40px;font-size:11px;color:#666;text-align:center}
+    @media print{.no-print{display:none}}
+  </style></head><body>
+  <button class="no-print" onclick="window.print()" style="position:fixed;top:16px;right:16px;background:#1C2D1C;color:#fff;border:none;padding:8px 18px;border-radius:8px;cursor:pointer;font-size:13px">Print / Save PDF</button>
+  <h1>Release of Liability and Acknowledgment and Acceptance</h1>
+  <h2>of Dangers, Risks and Hazards of Hunting Lease</h2>
+  <p>By signing this agreement, I hereby acknowledge that I have knowingly and willingly entered a Hunting Lease Agreement, or become a party bound by the terms and conditions of a Hunting Lease Agreement by and between <strong>${w.holderName}</strong>, et al. (hunter, hereinafter the Lessee, whether one or more) and Wight Cattle, LLC, et al. (landowner/lease manager, hereinafter the Lessor, whether one or more).</p>
+  <p>I further acknowledge and understand that no warranty, either express or implied, is made by the Lessor as to the condition of the hunting lease (hereinafter the leased premises) located in Crane and Upton County, Texas, or of any roads, buildings, gates or other improvements located thereon. This document serves to warn me that dangerous conditions, risks and hazards do exist. My presence and activities on the leased premises expose both me and my property to dangerous conditions, risks and hazards, including but not limited to: poisonous snakes, insects and spiders; blinds and tree stands, whether or not erected by Lessor; erosion and general condition of the land, both on and off roadways or senderos, creating rough, hazardous and dangerous driving and walking conditions; animals both wild and domestic that may be diseased and/or potentially dangerous; deep water; persons with firearms both on or off the leased premises; and the use of vehicles. I hereby state that I expressly assume all such dangers, risks and hazards.</p>
+  <p>In consideration for the right to enter the leased premises, I hereby release and agree to protect, indemnify and hold harmless the Lessor and his or her respective heirs, agents, employees and assigns from and against any and all claims, demands, causes of action and damages, including attorneys' fees, resulting from any accident, incident or occurrence arising out of, incidental to or in any way resulting from the use of the leased premises and all improvements thereon, whether or not caused by the Lessor's negligence or gross negligence. This release applies during the time that I am permitted on the leased premises. I hereby further covenant and agree that I, my heirs, successors and assigns will not make any claim or institute any suit or action at law or in equity against the Lessor or his or her respective heirs, agents, representatives, employees, successors or assigns by reason of conditions of the leased premises or activities occurring thereon.</p>
+  <p>I hereby further understand and agree to abide by all the rules, provisions and terms of this Hunting Lease Agreement as set forth by the Lessor. I further agree to abide by all state game laws as set forth by the Texas Parks &amp; Wildlife Department and all local, state, and federal laws while on the leased premises.</p>
+  <p>As used in this release, the terms I, my person and myself include minors in my care while on the leased premises.</p>
+  <p style="margin-top:20px">Date and signed this <strong>${new Date(w.signedAt).getDate()}</strong> day of <strong>${new Date(w.signedAt).toLocaleDateString('en-US',{month:'long'})}</strong>, ${new Date(w.signedAt).getFullYear()}.</p>
+  <div class="sig-row">
+    <div><div class="label">Lessee's Signature</div><div class="sig-box"><img src="${w.signature}"></div></div>
+    <div><div class="label">Lessee's Printed Name</div><div class="field" style="margin-top:60px">${w.printedName}</div></div>
+  </div>
+  <div><div class="label">Lessee's Address</div><div class="field">${w.address}</div></div>
+  <hr>
+  <p>I lessee, <strong>${w.holderName}</strong>, agree to the following terms set forth by lessor, Wight Cattle, LLC.:</p>
+  <p><strong>Terms:</strong></p>
+  <ol style="font-size:13px;padding-left:20px;margin:8px 0 20px">
+    <li>Have issued permit on person at all times.</li>
+    <li>Stay in designated/assigned hunting area.</li>
+    <li>Pick up all trash.</li>
+    <li>Do not tamper with water source.</li>
+    <li>Keep all gates the way you find them.</li>
+  </ol>
+  <div class="sig-row">
+    <div><div class="label">Lessee Signature</div><div class="sig-box"><img src="${w.termsSignature}"></div></div>
+    <div><div class="label">Date</div><div class="field" style="margin-top:60px">${signed}</div></div>
+  </div>
+  <div class="footer">
+    Digitally signed on ${signed} · Permit ${w.permitNumber} · ${w.ranchName}${w.email ? ' · ' + w.email : ''}
+  </div>
+  </body></html>`);
+  win.document.close();
 }
 function closeLegalModal() { S.legalView = null; renderAdmin(); }
 
@@ -1137,6 +1186,16 @@ async function submitWaiver(encodedPermit) {
       termsSignature: sigPads.terms.toDataURL(), termsSignedAt: now,
     });
     await firestore.collection(COLL).doc(p.id).set({ waiverSignedAt: now }, { merge: true });
+    // Auto-send permit link to hunter now that waiver is signed
+    if (ejReady() && p.email) {
+      try {
+        await emailjs.send(EJ_SERVICE_ID, EJ_PERMIT_TPL, {
+          to_name: p.holderName, to_email: p.email,
+          ranch_name: p.ranchName, permit_number: p.permitNumber,
+          permit_link: makeLink(p), expires_date: fmtDate(p.expiresDate),
+        }, EJ_PUBLIC_KEY);
+      } catch(e) { console.error('Permit email failed after waiver sign:', e); }
+    }
     waiverState.inProgress = false;
     waiverState.submitted  = true;
     renderWaiverSuccess(p);
@@ -1156,6 +1215,7 @@ function renderWaiverSuccess(p) {
         </div>
         <h2 class="text-xl font-bold text-gray-800 mb-2">Waiver Submitted</h2>
         <p class="text-gray-500 text-sm leading-relaxed">Your Release of Liability for <strong>${esc(p.ranchName)}</strong> has been signed and recorded.</p>
+        ${p.email ? `<p class="text-gray-500 text-sm mt-2">Your permit has been sent to <strong>${esc(p.email)}</strong>.</p>` : ''}
         <p class="text-gray-400 text-xs mt-4">You may close this page.</p>
       </div>
     </div>`;
